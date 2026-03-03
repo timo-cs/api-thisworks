@@ -1,4 +1,4 @@
-name = "cloudshapers-thisworkz-api"
+name = "api-thisworks"
 main = "index.js" # Zorg dat je javascript bestand in een 'src' mapje staat
 compatibility_date = "2026-03-03"
 
