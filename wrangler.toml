@@ -1,0 +1,17 @@
+name = "cloudshapers-thisworkz-api"
+main = "index.js" # Zorg dat je javascript bestand in een 'src' mapje staat
+compatibility_date = "2026-03-03"
+
+# Dit zorgt ervoor dat Make.com elk uur op minuut 0 nieuwe data krijgt
+[triggers]
+crons = ["0 * * * *"]
+
+# Omgevingsvariabelen (Niet-geheime instellingen)
+[vars]
+MAKE_WEBHOOK_URL = "https://hook.eu1.make.com/d2d1s5fo8d0n13pyk81d2zcuqyokukf1"
+
+# Database koppeling
+[[d1_databases]]
+binding = "DB" # Dit matcht met 'env.DB' in je worker.js
+database_name = "thisworkz"
+database_id = "529630ea-6dc0-4d40-8c7b-c804038996cd" # Zie stap 3 hoe je deze krijgt
