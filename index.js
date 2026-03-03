@@ -7,6 +7,11 @@ export default {
   // De kernlogica voor het ophalen en doorsturen
   async processHourlySync(env) {
     try {
+      // 0. DEBUG: Check of de secrets überhaupt bestaan in de Worker
+      if (!env.THISWORKZ_CLIENT_ID || !env.THISWORKZ_CLIENT_SECRET) {
+         throw new Error("Cloudflare Secrets missen! Zorg dat THISWORKZ_CLIENT_ID en THISWORKZ_CLIENT_SECRET zijn ingesteld via 'npx wrangler secret put'.");
+      }
+
       // 1A. Token Ophalen bij ThisWorkz
       const tokenUrl = 'https://lemur-2.cloud-iam.com/auth/realms/thisworkz/protocol/openid-connect/token';
       const tokenParams = new URLSearchParams();
@@ -15,7 +20,13 @@ export default {
       tokenParams.append('client_secret', env.THISWORKZ_CLIENT_SECRET);
 
       const tokenRes = await fetch(tokenUrl, { method: 'POST', body: tokenParams });
-      if (!tokenRes.ok) throw new Error("Kon geen token ophalen");
+      
+      // Uitgebreide foutafhandeling voor het token
+      if (!tokenRes.ok) {
+        const errorText = await tokenRes.text();
+        throw new Error(`Token API weigerde toegang (HTTP ${tokenRes.status}). Reactie van server: ${errorText}`);
+      }
+      
       const tokenData = await tokenRes.json();
       const token = tokenData.access_token;
 
@@ -24,6 +35,13 @@ export default {
       const opsRes = await fetch(opsUrl, {
         headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/json' }
       });
+      
+      // Uitgebreide foutafhandeling voor de data API
+      if (!opsRes.ok) {
+        const opsError = await opsRes.text();
+        throw new Error(`Data API weigerde toegang (HTTP ${opsRes.status}). Reactie van server: ${opsError}`);
+      }
+
       const opsData = await opsRes.json();
       const items = opsData.content || [];
 
@@ -38,7 +56,7 @@ export default {
         await insertOp.bind(item.remoteId, item.title, desc, item.source, item.location, item.deadlineDate).run();
       }
 
-      // 1D. Selecteer items die nog NIET naar Make.com zijn gestuurd (max 10 tegelijk om overbelasting te voorkomen)
+      // 1D. Selecteer items die nog NIET naar Make.com zijn gestuurd (max 10 tegelijk)
       const pendingQuery = await env.DB.prepare(`SELECT * FROM opportunities WHERE processed_for_ai = 0 LIMIT 10`).all();
       
       if (pendingQuery.results && pendingQuery.results.length > 0) {
@@ -85,6 +103,7 @@ export default {
       if (result.success) {
         return new Response(`Handmatige sync succesvol uitgevoerd! ${result.processed} nieuwe items naar Make.com gestuurd.`, { headers: corsHeaders });
       } else {
+        // Hier printen we de uitgebreide foutmelding op je scherm!
         return new Response(`Fout bij sync: ${result.error}`, { status: 500, headers: corsHeaders });
       }
     }
