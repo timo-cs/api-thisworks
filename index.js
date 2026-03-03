@@ -35,7 +35,7 @@ export default {
         headers: { 
           'Authorization': `Bearer ${token}`, 
           'Accept': 'application/json',
-          'User-Agent': 'CloudShapers-Integration/1.0' // Voorkomt dat de API ons als een bot blokkeert
+          'User-Agent': 'CloudShapers-Integration/1.0'
         },
         cf: { cacheTtl: 0 } // Vertel Cloudflare specifiek om dit niet te cachen
       });
@@ -46,15 +46,17 @@ export default {
 
       const opsData = await opsRes.json();
       
-      // Kijk of de data in 'content' zit, of dat de API een directe array stuurt
+      // 1C. HET PROBLEEM IS HIER OPGEGOST: Data zit in 'items', niet in 'content'
       let items = [];
-      if (opsData && Array.isArray(opsData.content)) {
-          items = opsData.content;
+      if (opsData && Array.isArray(opsData.items)) {
+          items = opsData.items;     // <-- Hier zat de data!
+      } else if (opsData && Array.isArray(opsData.content)) {
+          items = opsData.content;   // Fallback voor de zekerheid
       } else if (Array.isArray(opsData)) {
           items = opsData;
       }
 
-      // 1C. Als we 0 items hebben, breek dan af en stuur de ruwe data terug voor debugging
+      // Als we écht 0 items hebben, breek dan af
       if (items.length === 0) {
           return { success: true, api_count: 0, sent_count: 0, raw_data: opsData };
       }
@@ -113,7 +115,7 @@ export default {
     // --- TEST ROUTES ---
     if (request.method === 'GET' && url.pathname === '/api/reset-test') {
       await env.DB.prepare(`UPDATE opportunities SET processed_for_ai = 0`).run();
-      return new Response("Alles gereset! Alle database items staan weer klaar om naar Make.com gestuurd te worden.", { headers: corsHeaders });
+      return new Response("Alles gereset! Alle database items staan weer klaar om naar Make.com gestuurd te worden. Ga naar /api/force-sync om te testen.", { headers: corsHeaders });
     }
 
     if (request.method === 'GET' && url.pathname === '/api/force-sync') {
@@ -121,7 +123,6 @@ export default {
       if (result.success) {
         let msg = `DIAGNOSE RAPPORT:\n----------------\n1. Vacatures gevonden via API: ${result.api_count}\n2. Succesvol naar Make.com gestuurd: ${result.sent_count}\n`;
         
-        // Als het er 0 zijn, printen we precies wat de API wél stuurde!
         if (result.api_count === 0 && result.raw_data) {
             msg += `\nLET OP: Er zijn 0 items gevonden. Dit is de exacte (ruwe) data die de ThisWorkz server teruggaf:\n`;
             msg += JSON.stringify(result.raw_data, null, 2);
