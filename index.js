@@ -7,12 +7,10 @@ export default {
   // De kernlogica voor het ophalen en doorsturen
   async processHourlySync(env) {
     try {
-      // 0. Check of de secrets bestaan
       if (!env.THISWORKZ_CLIENT_ID || !env.THISWORKZ_CLIENT_SECRET) {
          throw new Error("Cloudflare Secrets missen! Stel THISWORKZ_CLIENT_ID en THISWORKZ_CLIENT_SECRET in.");
       }
 
-      // 1A. Token Ophalen bij ThisWorkz
       const tokenUrl = 'https://lemur-2.cloud-iam.com/auth/realms/thisworkz/protocol/openid-connect/token';
       const tokenParams = new URLSearchParams();
       tokenParams.append('grant_type', 'client_credentials');
@@ -27,8 +25,7 @@ export default {
       const tokenData = await tokenRes.json();
       const token = tokenData.access_token;
 
-      // 1B. Opportunities Ophalen (met anti-cache en User-Agent)
-      const timestamp = new Date().getTime(); // Voorkomt dat Cloudflare het antwoord onthoudt
+      const timestamp = new Date().getTime();
       const opsUrl = `https://matching.thisworkz.online/api/opportunities?page=0&size=50&status=NEW&sort=deadlineDate%2Cdesc&_nocache=${timestamp}`;
       
       const opsRes = await fetch(opsUrl, {
@@ -37,7 +34,7 @@ export default {
           'Accept': 'application/json',
           'User-Agent': 'CloudShapers-Integration/1.0'
         },
-        cf: { cacheTtl: 0 } // Vertel Cloudflare specifiek om dit niet te cachen
+        cf: { cacheTtl: 0 }
       });
       
       if (!opsRes.ok) {
@@ -46,22 +43,19 @@ export default {
 
       const opsData = await opsRes.json();
       
-      // 1C. HET PROBLEEM IS HIER OPGEGOST: Data zit in 'items', niet in 'content'
       let items = [];
       if (opsData && Array.isArray(opsData.items)) {
-          items = opsData.items;     // <-- Hier zat de data!
+          items = opsData.items;
       } else if (opsData && Array.isArray(opsData.content)) {
-          items = opsData.content;   // Fallback voor de zekerheid
+          items = opsData.content;
       } else if (Array.isArray(opsData)) {
           items = opsData;
       }
 
-      // Als we écht 0 items hebben, breek dan af
       if (items.length === 0) {
           return { success: true, api_count: 0, sent_count: 0, raw_data: opsData };
       }
 
-      // 1D. Opslaan in D1 database (Nieuwe toevoegen, bestaande negeren op basis van ID)
       const insertOp = env.DB.prepare(`
         INSERT OR IGNORE INTO opportunities (id, title, description, source, location, deadline)
         VALUES (?, ?, ?, ?, ?, ?)
@@ -73,20 +67,17 @@ export default {
         await insertOp.bind(item.remoteId, item.title, desc, item.source, loc, item.deadlineDate).run();
       }
 
-      // 1E. Selecteer items die nog NIET naar Make.com zijn gestuurd (max 10 per keer om timeouts te voorkomen)
       const pendingQuery = await env.DB.prepare(`SELECT * FROM opportunities WHERE processed_for_ai = 0 LIMIT 10`).all();
       let sentCount = 0;
 
       if (pendingQuery.results && pendingQuery.results.length > 0) {
         for (const pending of pendingQuery.results) {
-          // Stuur naar de Make.com Webhook
           const makeRes = await fetch(env.MAKE_WEBHOOK_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(pending)
           });
           
-          // Markeer in de database als verzonden als Make.com succesvol (HTTP 200) antwoordt
           if (makeRes.ok) {
             await env.DB.prepare(`UPDATE opportunities SET processed_for_ai = 1 WHERE id = ?`).bind(pending.id).run();
             sentCount++;
@@ -101,31 +92,47 @@ export default {
     }
   },
 
-  // 2. DE HTTP API (Voor Frontend, Make.com én handmatig testen)
+  // 2. DE HTTP API (Beveiligd)
   async fetch(request, env) {
     const url = new URL(request.url);
+    
+    // CORS Headers: Sta toe dat de frontend (en Make.com) de API mogen bereiken
     const corsHeaders = {
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': '*', // Tip: Maak dit specifieker (bijv. 'https://jouwdashboard.nl') voor productie
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, x-api-key', // x-api-key toegevoegd voor autorisatie
     };
 
+    // Preflight request voor CORS altijd doorlaten
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+    // --- BEVEILIGING: API KEY CHECK ---
+    // Controleer op een sleutel in de headers OF in de URL parameters
+    const providedKey = request.headers.get('x-api-key') || url.searchParams.get('key');
+    
+    if (!env.API_SECRET) {
+       return new Response('Configuratiefout: API_SECRET is niet ingesteld in Cloudflare.', { status: 500, headers: corsHeaders });
+    }
+
+    if (providedKey !== env.API_SECRET) {
+       return new Response('Toegang geweigerd: Ongeldige of ontbrekende API sleutel.', { status: 401, headers: corsHeaders });
+    }
+    // ----------------------------------
+
+    // Vanaf hier zijn alleen geautoriseerde verzoeken toegestaan
 
     // --- TEST ROUTES ---
     if (request.method === 'GET' && url.pathname === '/api/reset-test') {
       await env.DB.prepare(`UPDATE opportunities SET processed_for_ai = 0`).run();
-      return new Response("Alles gereset! Alle database items staan weer klaar om naar Make.com gestuurd te worden. Ga naar /api/force-sync om te testen.", { headers: corsHeaders });
+      return new Response("Alles gereset! Alle database items staan weer klaar om naar Make.com gestuurd te worden.", { headers: corsHeaders });
     }
 
     if (request.method === 'GET' && url.pathname === '/api/force-sync') {
       const result = await this.processHourlySync(env);
       if (result.success) {
         let msg = `DIAGNOSE RAPPORT:\n----------------\n1. Vacatures gevonden via API: ${result.api_count}\n2. Succesvol naar Make.com gestuurd: ${result.sent_count}\n`;
-        
         if (result.api_count === 0 && result.raw_data) {
-            msg += `\nLET OP: Er zijn 0 items gevonden. Dit is de exacte (ruwe) data die de ThisWorkz server teruggaf:\n`;
-            msg += JSON.stringify(result.raw_data, null, 2);
+            msg += `\nLET OP: Er zijn 0 items gevonden. Ruwe data:\n${JSON.stringify(result.raw_data, null, 2)}`;
         }
         return new Response(msg, { headers: { 'Content-Type': 'text/plain', ...corsHeaders } });
       } else {
@@ -133,7 +140,7 @@ export default {
       }
     }
 
-    // --- FRONTEND ROUTE: HAAL DASHBOARD DATA OP ---
+    // --- FRONTEND ROUTE ---
     if (request.method === 'GET' && url.pathname === '/api/opportunities') {
       const query = `
         SELECT o.id, o.title as rol, o.location as locatie, o.deadline, o.datum, o.source as api_source,
@@ -147,7 +154,7 @@ export default {
       return new Response(JSON.stringify(results), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
     }
 
-    // --- MAKE.COM ROUTE: ONTVANG DATA TERUG VAN CLAUDE ---
+    // --- MAKE.COM ROUTE ---
     if (request.method === 'POST' && url.pathname === '/api/save-assessment') {
       try {
         const body = await request.json();
@@ -157,20 +164,9 @@ export default {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         await insertAss.bind(
-          body.opportunity_id, 
-          body.relevant ? 1 : 0, 
-          body.match, 
-          body.klant, 
-          body.eindklant, 
-          body.broker, 
-          body.contactpersoon,
-          body.contact_email, 
-          body.contact_telefoon, 
-          body.tarief, 
-          body.uren, 
-          body.startdatum, 
-          body.samenvatting, 
-          JSON.stringify(body.kandidaten)
+          body.opportunity_id, body.relevant ? 1 : 0, body.match, body.klant, body.eindklant, 
+          body.broker, body.contactpersoon, body.contact_email, body.contact_telefoon, 
+          body.tarief, body.uren, body.startdatum, body.samenvatting, JSON.stringify(body.kandidaten)
         ).run();
         return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
       } catch (error) {
